@@ -621,14 +621,16 @@ namespace Rubeus {
                         // This is a shortcut - the PAC will be the last element
                         AsnElt ad = s;
                         byte[] pac;
-
-                        // The AsnElt library seems to fail to fully decode it, so this is a workaround
                         while (true)
                         {
                             for (; ad.Sub != null && ad.Sub.Length > 0; ad = ad.Sub[ad.Sub.Length - 1]) ;
                             pac = ad.GetOctetString();
-                            if (pac[0] == 0x30) // 0x30 is SEQUENCE in ASN.1
+
+                            // The AsnElt library seems to fail to fully decode this structure, so this is a workaround
+                            // 0x30 is SEQUENCE in ASN.1, but there could be a PAC with 0x30 entries (unlikely); The PAC version MUST be 0x0 (https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-pac/6655b92f-ab06-490b-845d-037e6987275f)
+                            if (pac[0] == 0x30 && !(pac[4] == 0 && pac[5] == 0 && pac[6] == 0 && pac[7] == 0))
                             {
+                                // If it's not a PAC, decode and keep going
                                 ad = AsnElt.Decode(pac, false);
                             }
                             else
