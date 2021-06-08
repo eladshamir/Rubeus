@@ -580,7 +580,7 @@ namespace Rubeus {
                 string dcIP = Networking.GetDCIP(info.prealm, false);
                 if (String.IsNullOrEmpty(dcIP)) { return null; }
 
-                byte[] tgsBytes = TGS_REQ.NewTGSReq(info.pname.name_string[0], info.prealm, info.pname.name_string[0], kirbi.tickets[0], encRepPart.key.keyvalue, (Interop.KERB_ETYPE)encRepPart.key.keytype, (Interop.KERB_ETYPE)encRepPart.key.keytype, Interop.KdcOptions.ENCTKTINSKEY, rep.ticket);
+                byte[] tgsBytes = TGS_REQ.NewTGSReq(info.pname.name_string[0], info.prealm, info.pname.name_string[0], kirbi.tickets[0], encRepPart.key.keyvalue, (Interop.KERB_ETYPE)encRepPart.key.keytype, (Interop.KERB_ETYPE)encRepPart.key.keytype, false, "", false, false, false, false, null, false, Interop.KdcOptions.ENCTKTINSKEY, rep.ticket);
 
                 byte[] response = Networking.SendBytes(dcIP, 88, tgsBytes);
                 if (response == null)
